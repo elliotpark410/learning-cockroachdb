@@ -176,7 +176,170 @@ WHERE publish_date > '1990-01-01'
 - `ALTER TABLE bookly.uuid_pk SCATTER;`
 - scatter command is used for distributing data ranges across the cluster
 - usually for initial data loading or when encountering hotspots
-- 
 
+
+**DB Isolation Levels**
+1. Serializable
+2. Snapshot
+3. Repeatable Read
+4. Read Committed
+5. Read Uncommitted
+
+
+**Transactions in CockroachDB**
+- Transaction means you commit all or none to ensure consistency
+- Commit = success with all changes applied
+- Rollback = failure with all changes undone
+- Transactions must be isolated - essential for distributed systems with multiple clients
+- when migrating from `READ COMMITTED` database like Postgres to CockroachDB. Update isolation level in CockroachDB to `READ COMMMITTED`
+
+
+**Pros of Serializable Isolation**
+- ensures consistency
+- eliminates need for pre or post transaction validation
+- a failed serializable transaction will succeed when you retry
+
+
+**Cons of Serializable Isolation**
+- data anomalies turn into errors
+- code must handle the exectpions with try/catch and the catch has a retry
+- increase in exceptions leads to reduction in db efficiency
+- less throughput
+- increases conetention which is difficult to predict
+
+**Contention**
+- Contention occurs when multiple transactions (and one transaction writes) try to access the same rows at the same time, leading to performance degradation
+- Contention is challenging to debug because it is difficult to predict
+- Contention can cause row level locking so it's important that a retry is in transaction code
+- Mitigating Contention:
+1. locking - contending transactions are blocked and will wait after the first transaction commits
+2. blocking - delay a response to application. The more blocking, the more significant the impact
+3. aborting - aborted transaction throw a retry error. All previous work gets discarded and must be redone
+
+
+**Dealing with Conention**
+- `SELECT FOR UPDATE` this will lock the row and queue or block other transactions
+
+**Order and type of Queries matter with Contention**
+- If 2 UPDATE queries are contentious, it will be one after the other
+
+Query 1
+```
+BEGIN;
+UPDATE table SET value = 'A' WHERE key = 2;
+COMMIT;
+```
+Query 2
+```
+BEGIN;
+UPDATE table SET value = 'B' WHERE key = 2;
+COMMIT;
+```
+
+<br>
+
+- If 1 query is a SELECT, then this could introduce non-repeatable reads i.e. incorrect value. Serializable isolation prevents this
+Query 1
+```
+BEGIN;
+SELECT value FROM table WHERE key = 2;
+UPDATE table SET value = 'A' WHERE key = 2;
+COMMIT;
+```
+
+Query 2 begins after Query 1's SELECT statement is executed
+```
+BEGIN;
+UPDATE table SET value = 'B'
+WHERE key = 2;
+COMMIT;
+```
+
+
+**Transaction Retry Best Pratices**
+- retry logic helps ensure transaction consistency and minimizes database contention
+- try-catch
+- loop the try-catch block
+- retry if you receive a retry error
+- limit the loop with a max e.g. 3 retries
+- include an exponential backoff
+- avoid changing global state until transaction commits
+
+
+**Optimizing Transactions**
+- best practice is to minimize transaction # of rows and duration
+- transaction breadth - # of rows a transaction touches
+- transaction duration - how long a transactions lasts
+- CTE (Common Table Expression) can limit transaction breadth
+- CTEs are like a named subqeruy. It functions as a virtual table that only its main query can access
+
+- Example of updating too many rows
+```
+BEGIN;
+UPDATE book SET paperback_quantity = 0;
+COMMIT;
+```
+
+- Example of updating a subset of relevant rows - optimized for transaction breadth
+```
+BEGIN;
+
+WITH paperback_books AS (
+  SELECT * FROM books
+  WHERE paperback_quantity > 0
+)
+
+UPDATE books SET paperback_quantity = 0
+FROM paperback_books
+WHERE id IN (SELECT id FROM paperback_books);
+
+COMMIT;
+```
+
+- Example of making small transactions - optimized for transaction duration
+```
+BEGIN;
+UPDATE books SET paperback_quantity_status = 'unavailable'
+WHERE paperback_quantity_status = 'available'
+COMMIT;
+```
+
+<br>
+
+```
+BEGIN;
+UPDATE book SET paperback_quantity = 0;
+COMMIT;
+```
+
+
+**Implicit Transactions**
+- Implicit transactions do not include `BEGIN` and `COMMIT`
+- implicit transactions can be automatically retried by the database engine
+- implicit transactions can lead to better efficency by avoid unnecessary round trips between the app and CockroachDB
+
+
+**JDBC**
+- Java Database Connectivity (JDBC) allows Java applications to interact with databases
+- Things JDBC does:
+1. Open connection
+2. Create cursor
+3. Submit query
+4. Iterate over results
+5. Close cursor
+6. Close connection
+
+**Auto Commit in JDBC**
+- Default in plain JDBC
+- Auto commit automatically commits changes to the database after each SQL statement so you don't need `BEGIN` and `COMMIT`
+- automatically committing changes minimizes duration and reduces contention. only use for single SQL statements
+- if you need multiple operations in a single transaction, consider switching back to explicit transactions
+
+**Connection Pools**
+- reusing connections instead of opening and closing new connections
+- opening and closing thousands of new connections is resource intensive
+- a potential drawback, if all connections are in use new requests will have to wait
+- max number of connections = cores (or vCPU) x 4
+- max connection lifetime = 300,000 ms or 5 minutes
 
 
