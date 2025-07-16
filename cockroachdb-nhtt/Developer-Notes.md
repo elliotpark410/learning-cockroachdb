@@ -343,3 +343,207 @@ COMMIT;
 - max connection lifetime = 300,000 ms or 5 minutes
 
 
+**Multi-Region Deployments**
+- Benefits:
+- CockroachDB can make intelligent decisions about data placement
+- cluster understands geographic boundaries for replica placement
+- system can optimize for regional latency and survival goals
+
+- Outcome:
+1. low-latency reads
+2. high throughput writes
+3. data governance / data residency
+4. regional survivability - zero downtime and zero data loss with a region going down
+- after initial setup, you need to use locality to configure region and zone. you might have a multi-region cluster, but you gave to configure for multi-region database. e.g. select a primary region
+```
+cockroach start \
+--locality=region=us-west-1, zone=usw1-az1 \
+--join=...
+```
+
+**Setting up a Primary Region**
+- CockroachDB moves all leaseholders to the primary region
+- makes read/writes efficient from primary region
+- After choosing a primary region, when you add more regions and CockroachDB distributes the replicas across the nodes
+- if you start with US-East as a primary region, then add US-Central. You will have 3 voting replicas in US-East and 1 non-voting replica in US-Central
+
+
+**Voting vs Non-Voting Replicas**
+- Voting replicas vote to achieve quorum which allows writes to get committed. They are deployed to primary region
+- Non-voting replicas can be created that accept updates from the leaseholder
+- Non-voting replicas are available for follower reads 5 second delay from latest data
+
+
+**Surviving AZ Failure**
+- `ALTER DATABASE database_name SURVIVE ZONE FAILURE`
+- this is the default for multi-region clusters
+- if one AZ in the primary region fails, new leaseholders are elected if required and database remains online
+- if two AZs in primary region fail, it's gg
+
+
+**Surviving Region Failure**
+- `ALTER DATABASE database_name SURVIVE REGION FAILURE`
+- when survival goal is `REGION`, CRDB automatically configures the number and placement of replicas to ensure db availability in event of regional failure
+- voting replicas must be spread across all three regions
+
+
+**Optimizing Multi-Region Latency**
+- Consistency requires a majority must agree before commit
+- latency sources: slow SQL statements and network latency
+
+
+**Non-Voting Replicas**
+- support low-latency reads from every region by minimizing network latency from round-trip time
+- data is slightly stale but consistent
+- write latency remains unaffected
+- can be promoted to voting replica during a failure
+
+
+**Global Tables**
+- faster reads, but slower writes
+- stale reads are not acceptable
+- needs multi-region resiliency
+- use global table for reference data with high read frequency and minimal updates
+- rows in the table cannot be tied to a specific region
+- average of 800 ms write latency and 10 ms read latency
+
+
+**Table Locality**
+- fast reads and writes from a single region
+- it can be configured at table level or row level
+- table locality defines where leaseholder is placed. Default is primary region
+- use regional table when most traffic is concentrated in a single region
+- use regional by row table for per-user data and multi-tenant workloads. It creates a hidden column "crdb_region"
+
+
+**Follower Reads**
+- strong follower reads require global tables and it goes to the nearest replica
+- stale follower reads does not consider locality and is defined with `AS OF SYSTEM TIME follower_read_timestamp()`
+- use when you can read from nearyby follower replicas to reduce read latency, if slightly old data (4.8 seconds) is ok
+- reduces load on the leaseholder
+- follower reads must be between 4.8s and gc.ttlseconds old to avoid garbage collected data.
+```
+SELECT
+    user
+FROM movr_users.users
+AS OF SYSTEM TIME follower_read_timestamp();
+```
+
+**Enabling Data Locality Regional By Row with Migration**
+- `SET enable_auto_rehoming = on;`
+
+
+**What is in a Certificate?**
+1. Public key of the node
+2. Node identity information
+3. Validity period
+4. Digital signature of the CA
+
+
+**Certificate Authority (CA) Creation**
+```
+cockroach cert create-ca \
+--certs-dir=certs \
+--ca-key=my-safe-directory/ca.key
+```
+
+
+**Node Certificate**
+```
+cockroach cert create-node \
+    node1 \ --aliases for node1
+    <NODE1_IP> \
+    localhost \
+    127.0.0.1 \
+    --certs-dir=certs \
+    --ca-key=my-safe-directory/ca.key \
+    --overwrite
+
+mkdir -p certs/node1
+mv certs/node.crt certs/node1/
+mv certs/node.key certs/node1/
+cp certs/ca.crt certs/node1/
+```
+
+
+**Root User Certificate**
+```
+cockroach cert create-client \
+root \
+--certs-dir=certs \
+--ca-key=my-safe-directory/ca.key
+```
+
+
+**Listing Certificates**
+```
+cockroach cert list --certs-dir certs/
+```
+
+**Command to autgenerate HAProxy config file**
+```
+cockroach gen haproxy \
+  --certs-dir=certs \
+  --host=node1
+```
+
+**HAProxy Commands**
+1. Deploy config to HAProxy server
+`scp haproxy.cfg haproxy:/etc/haproxy/haproxy.cfg`
+
+2. Start or restart HAProxy
+`ssh haproxy "sudo systemctl restart haproxy"`
+
+3. Verify HAProxy is running
+`ssh haproxy "systemctl status haproxy"`
+
+4. Test with a sample workload
+```
+cockroach workload init bank \
+"postgresql://root@haproxy:26257?\
+sslmode=verify-full&\
+sslcert=certs/client.root.crt&\
+sslkey=certs/client.root.key&\
+sslrootcert=certs/ca.crt"
+```
+
+
+**Encryption At Rest**
+- Generate AES encryption keys (128/256-bit)
+```
+cockroach gen encryption-key --size=128 \
+   --enterprise-encryption-key=path/to/aes-128.key
+
+```
+
+- Distribute keys to all cluster nodes
+```
+for node in node{1..5}; do
+  scp certs/aes-128.key root@$node:certs/
+  ssh root@$node 'chmod 600 certs/aes-128.key'
+done
+```
+
+
+- First time using AES-128, use old-key=plain:
+```
+cockroach start \
+   ...
+   --enterprise-encryption=path=cockroach-data,
+     key=certs/aes-128.key,
+     old-key=plain
+   ...
+```
+
+
+- Key rotation - restart nodes to re-encrypt data:
+```
+cockroach start \
+   ...
+   --enterprise-encryption=path=cockroach-data,
+     key=certs/aes-256.key,
+     old-key=certs/aes-128.key
+   ...
+```
+
+
