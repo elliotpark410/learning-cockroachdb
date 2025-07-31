@@ -547,3 +547,116 @@ cockroach start \
 ```
 
 
+**Garbage Collection**
+- useful because MVCC takes up storage and can impact performance
+- MVCC keeps old versions for updates and keeps deleted data until garbage collection removes it
+- garbage collection runs on the leaseholder
+- you can run garbage collection to remove older versions
+- default garbage collection is 4 hours
+- can be configured at the database or table level
+- when updating garbage collection, take into consideration the requirement for older versions e.g. PITR, `AS OF SYSTEM TIME`, and follower read queries
+- monitoring Garbage Collection: check storage, show jobs, and garbage collection metrics in DB Console
+
+
+**Other uses for Garbage Collection Besides MVCC**
+- index creation doubles storage temporarily
+- deleted data remains until garbage collection
+- dropping columns or tables leaves behind metadata that is cleaned up by garbage collection
+
+
+**Monitoring Garbage Collection**
+- DB Console Metrics - storage usage graphs
+- Garbage Collection related metrics
+- System Impact - Observe CPU and memory usage during Garbage Collection processes
+- SHOW JOBS output
+
+
+**Best Practices for Garbage Collection**
+- Careful consideration required for Garbage Collection when longer retention might be necessary for PITR or older historical queries
+- Larger gc.ttlseconds can increase storage costs
+- Workload Profile: High throughput or frequent schema changes may require higher TTL
+- Backup Windows: Ensure TTL covers all versions required for consistent snapshots
+- Peak Usage: Plan for temporary storage spikes during migrations or index backfills
+- Monitoring: Regularly verify GC is sufficient. Adjust if disk usage is unexpectedly high
+
+
+**Why Data Distribution Matters**
+- balances workload across nodes
+- optimizes resource usage
+- consistent performance
+- better for high availability
+
+
+**Range Distribution**
+- CockroachDB offers automatic balancing of ranges with allocator
+- But it can do it manually by creating splits replica placement rules
+
+
+**Zone Configurations**
+- Control replication factor
+- Define replica constraints
+- Set storage parameters
+- Manage lease preferences
+- Override system defaults
+
+**Monitoring your Cluster**
+- `SHOW RANGES` to inspect range size, replica locations, replication factor, and key distribution
+- check replication factor
+
+
+**Write Intents**
+- write intent is when a transaction has begun but hasn't been committed yet
+- temporary markers placed on data when a transaction has not yet committed
+- ensures integrity by allowing other transactions to detect that data is being changed
+- requires cleanup after transaction completion
+- affects cluster storage utilization
+- write intents can build up in highly active systems so it must be managed properly
+
+
+**Write Intent Lifecycle**
+1. Created at transaction `BEGIN`
+2. Block conflicting operations
+3. Persist until transaction `COMMIT or ABORT`
+4. Cleanup
+
+**Impact of Write Intent Buildup**
+- transaction conflicts: multiple transactions attempting to modify the ame rows can collide, increasing the risk of restarts or backoffs
+- storage overhead: each intent adds an extra version which can increase storage size
+- cleanup costs: more intents equals more processing by cleanup job
+- performance degradation: too many intents can slow cleanup, causing cluster throughput to suffer
+
+
+**How to Monitor Write Intents Cleanup**
+- Active Transaction Inspection: Queries / DB Console chan show how many transactions are currently open and what they're modifying
+- Intent Counts: Look for metrics that track number of outstanding write intents. High intent counts may signal a problem
+- Cleanup Duration: how long does it take to resolve intents after commit or rollback? Prolonged cleanup times can indicate contention or low resources
+- System-wide Metrics: high-intent workloads impact everything. If resource metrics spike without throughput increases, write intents could be at fault
+- Performance Profiling: use logs and traces to analyze transactions under load. Identify pattersn that point to excessive write intent activity
+
+
+**Optimizing Batches To Avoid Write Intents**
+- Batching means grouping multiple statements into a single transaction
+- This approach can improve throughput but may lead to a large number of write intents if transaction is too big
+- Best praactice is to have small transactions to minimize duration and chances of write intents
+- Appropriate Batch Sizing: if batch is too large, it may hold onto many write intents for an extended period, increasing conflict potential. If it's too small, overhead from transaction setup could reduce throughput
+- Transaction Scope Control: make sure each transaction changes are related. Combining unrelated operations increasees chance of contention and complicated rollbacks
+
+
+**Additional Batching Tactics**
+- Throughput vs Overhead: Large batches can boost throughput but risk greater conflict and require more cleanup. Smaller batches reduce conflicts but also potential throughput
+- Concurrency Allowance: multiple moderately-sized transactions can be better handled by the cluster by spreading across all nodes. This reduces buildup of any single transaction write intents
+
+**Optimizing Transactions**
+- limit transaction size
+- use appropriate batch size
+- schedule large updates carefully
+- monitor system metrics
+- plan for cleanup overhead
+
+
+**Point In Time Restore**
+- requires a combination of backups and MVCC
+- you need to enable Revision History to do PITR to any timestamp
+- without Revision History, you can only do a full restore at backup time
+
+
